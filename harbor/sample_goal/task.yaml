@@ -1,0 +1,7 @@
+id: minishop-blue-mug-x2
+title: Buy two blue mugs in MiniShop
+goal:
+  item: blue-mug
+  qty: 2
+start_url: ../../site/index.html?item=blue-mug&qty=2&seed=42&popup_p=0.15&delay_p=0.10
+success: Order placed with blue-mug x2
