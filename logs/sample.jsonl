@@ -1,0 +1,1 @@
+{"episode":1,"seed":42,"goal":"blue-mug x2","step":1,"observation":{"screen":"catalog","buttons":[{"i":0,"text":"View","clickable":true}]},"action":"wait","reward":-0.01,"done":false,"truncated":false,"step_ms":150,"popup_visible":false}

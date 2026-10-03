@@ -1,0 +1,7 @@
+logs/*.jsonl
+!logs/sample.jsonl
+__pycache__/
+*.pyc
+build/
+env/minishop_env
+agents/q_table.json
