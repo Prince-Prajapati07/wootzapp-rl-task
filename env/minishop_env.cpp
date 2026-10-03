@@ -92,6 +92,24 @@ UrlParts parse_ws_url(const std::string& url) {
 
 class WebSocket {
     int fd = -1;
+    bool read_exact(unsigned char* dst, size_t len) {
+        size_t got = 0;
+        auto deadline = Clock::now() + std::chrono::seconds(5);
+        while (got < len && Clock::now() < deadline) {
+            int n = recv(fd, dst + got, len - got, 0);
+            if (n > 0) {
+                got += n;
+                continue;
+            }
+            if (n == 0) return false;
+            if (errno == EINTR || errno == EAGAIN || errno == EWOULDBLOCK) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(10));
+                continue;
+            }
+            return false;
+        }
+        return got == len;
+    }
 public:
     void connect_url(const std::string& url) {
         UrlParts u = parse_ws_url(url);
@@ -124,19 +142,19 @@ public:
     }
     std::string recv_text() {
         unsigned char h[2];
-        if (recv(fd, h, 2, MSG_WAITALL) != 2) throw std::runtime_error("websocket read failed");
+        if (!read_exact(h, 2)) throw std::runtime_error("websocket read failed");
         int opcode = h[0] & 15;
         uint64_t len = h[1] & 127;
-        if (len == 126) { unsigned char e[2]; recv(fd, e, 2, MSG_WAITALL); len = (e[0] << 8) | e[1]; }
+        if (len == 126) { unsigned char e[2]; if (!read_exact(e, 2)) throw std::runtime_error("websocket length read failed"); len = (e[0] << 8) | e[1]; }
         else if (len == 127) {
-            unsigned char e[8]; recv(fd, e, 8, MSG_WAITALL); len = 0;
+            unsigned char e[8]; if (!read_exact(e, 8)) throw std::runtime_error("websocket length read failed"); len = 0;
             for (int i = 0; i < 8; i++) len = (len << 8) | e[i];
         }
         bool masked = h[1] & 128;
         unsigned char mask[4] = {0,0,0,0};
-        if (masked) recv(fd, mask, 4, MSG_WAITALL);
+        if (masked && !read_exact(mask, 4)) throw std::runtime_error("websocket mask read failed");
         std::string out(len, '\0');
-        recv(fd, out.data(), len, MSG_WAITALL);
+        if (len > 0 && !read_exact(reinterpret_cast<unsigned char*>(out.data()), len)) throw std::runtime_error("websocket payload read failed");
         if (masked) for (size_t i = 0; i < out.size(); i++) out[i] ^= mask[i % 4];
         if (opcode == 8) throw std::runtime_error("websocket closed");
         return out;
@@ -237,8 +255,9 @@ public:
    const r = b.getBoundingClientRect();
    return {i, text:b.textContent.trim(), clickable:blocked ? b.id === 'dismiss' : !b.disabled, x:r.left+r.width/2, y:r.top+r.height/2};
  });
- return {screen:s.screen || "unknown", goal:document.getElementById("goal").textContent.replace("Goal: ",""),
-         visibleText:document.body.innerText,
+ const goalEl = document.getElementById("goal");
+ return {screen:s.screen || "unknown", goal:goalEl ? goalEl.textContent.replace("Goal: ","") : "",
+         visibleText:document.body ? document.body.innerText : "",
          buttons, popup:blocked, orderPlaced:!!s.orderPlaced, orderItem:s.orderItem || "", orderQty:s.orderQty || 0};
 })())JS";
         last_obs = eval(script);
@@ -254,8 +273,13 @@ public:
             << "&qty=" << task["qty"].get<int>() << "&seed=" << req.value("seed", 1)
             << "&popup_p=" << req.value("popup_p", 0.15) << "&delay_p=" << req.value("delay_p", 0.0);
         cdp("Page.navigate", {{"url", url.str()}});
-        std::this_thread::sleep_for(std::chrono::milliseconds(250));
-        return observe();
+        json obs;
+        for (int i = 0; i < 30; i++) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+            obs = observe();
+            if (!obs.is_null() && obs.value("screen", "unknown") != "unknown" && obs.value("goal", "") == goal) return obs;
+        }
+        return obs;
     }
     json step(const std::string& action) {
         auto start = Clock::now();
