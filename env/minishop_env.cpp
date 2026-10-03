@@ -56,6 +56,21 @@ int connect_tcp(const std::string& host, int port) {
     return fd;
 }
 
+int find_free_port() {
+    int fd = socket(AF_INET, SOCK_STREAM, 0);
+    if (fd < 0) throw std::runtime_error("socket failed");
+    sockaddr_in addr{};
+    addr.sin_family = AF_INET;
+    addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    addr.sin_port = 0;
+    if (bind(fd, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) != 0) throw std::runtime_error("bind failed");
+    socklen_t len = sizeof(addr);
+    if (getsockname(fd, reinterpret_cast<sockaddr*>(&addr), &len) != 0) throw std::runtime_error("getsockname failed");
+    int port = ntohs(addr.sin_port);
+    close(fd);
+    return port;
+}
+
 std::string http_request(const std::string& method, const std::string& path, int port) {
     int fd = connect_tcp("127.0.0.1", port);
     timeval tv{3, 0};
@@ -94,7 +109,7 @@ class WebSocket {
     int fd = -1;
     bool read_exact(unsigned char* dst, size_t len) {
         size_t got = 0;
-        auto deadline = Clock::now() + std::chrono::seconds(5);
+        auto deadline = Clock::now() + std::chrono::seconds(90);
         while (got < len && Clock::now() < deadline) {
             int n = recv(fd, dst + got, len - got, 0);
             if (n > 0) {
@@ -167,6 +182,7 @@ class Env {
     int next_id = 1;
     int step_no = 0;
     int episode = 0;
+    int cur_seed = 0;
     std::string site_path, log_path, goal;
     std::ofstream log;
     json last_obs = json::object();
@@ -177,25 +193,35 @@ public:
     void start() {
         int pipefd[2];
         if (pipe(pipefd) != 0) throw std::runtime_error("pipe failed");
+        int debug_port = find_free_port();
         chrome_pid = fork();
         if (chrome_pid == 0) {
             close(pipefd[0]);
             dup2(pipefd[1], 1);
             dup2(pipefd[1], 2);
             std::string profile = "--user-data-dir=/tmp/minishop-cdp-" + std::to_string(getpid());
-            execlp("chromium-browser", "chromium-browser", "--headless=new", "--disable-gpu", "--no-sandbox",
-                  "--disable-dev-shm-usage", "--remote-debugging-port=0", profile.c_str(), "about:blank", nullptr);
-            execlp("chromium", "chromium", "--headless=new", "--disable-gpu", "--no-sandbox",
-                  "--disable-dev-shm-usage", "--remote-debugging-port=0", profile.c_str(), "about:blank", nullptr);
+            std::string port_arg = "--remote-debugging-port=" + std::to_string(debug_port);
             execlp("google-chrome", "google-chrome", "--headless=new", "--disable-gpu", "--no-sandbox",
-                  "--disable-dev-shm-usage", "--remote-debugging-port=0", profile.c_str(), "about:blank", nullptr);
+                  "--disable-dev-shm-usage", port_arg.c_str(), profile.c_str(), "about:blank", nullptr);
+            execlp("chromium-browser", "chromium-browser", "--headless=new", "--disable-gpu", "--no-sandbox",
+                  "--disable-dev-shm-usage", port_arg.c_str(), profile.c_str(), "about:blank", nullptr);
+            execlp("chromium", "chromium", "--headless=new", "--disable-gpu", "--no-sandbox",
+                  "--disable-dev-shm-usage", port_arg.c_str(), profile.c_str(), "about:blank", nullptr);
             _exit(1);
         }
         close(pipefd[1]);
         fcntl(pipefd[0], F_SETFL, O_NONBLOCK);
         std::string output, browser_ws;
-        auto deadline = Clock::now() + std::chrono::seconds(30);
+        auto deadline = Clock::now() + std::chrono::seconds(90);
         while (Clock::now() < deadline) {
+            try {
+                std::string body = http_request("GET", "/json/version", debug_port);
+                std::string from_http = json::parse(body).value("webSocketDebuggerUrl", "");
+                if (!from_http.empty()) {
+                    browser_ws = from_http;
+                    break;
+                }
+            } catch (...) {}
             char buf[512];
             int n = read(pipefd[0], buf, sizeof(buf));
             if (n > 0) {
@@ -214,14 +240,16 @@ public:
         }
         close(pipefd[0]);
         if (browser_ws.empty()) throw std::runtime_error("chromium did not print DevTools URL: " + output);
+        if (browser_ws.find("127.0.0.1/") != std::string::npos) {
+            browser_ws.replace(browser_ws.find("127.0.0.1/"), 10, "127.0.0.1:" + std::to_string(debug_port) + "/");
+        }
         debug("browser ws " + browser_ws);
-        UrlParts parts = parse_ws_url(browser_ws);
-        debug("http new on port " + std::to_string(parts.port));
-        std::string body = http_request("PUT", "/json/new?about:blank", parts.port);
+        debug("http new on port " + std::to_string(debug_port));
+        std::string body = http_request("PUT", "/json/new?about:blank", debug_port);
         debug("new body " + body.substr(0, 160));
         std::string ws_url = json::parse(body).value("webSocketDebuggerUrl", "");
         if (ws_url.find("127.0.0.1/") != std::string::npos) {
-            ws_url.replace(ws_url.find("127.0.0.1/"), 10, "127.0.0.1:" + std::to_string(parts.port) + "/");
+            ws_url.replace(ws_url.find("127.0.0.1/"), 10, "127.0.0.1:" + std::to_string(debug_port) + "/");
         }
         debug("page ws " + ws_url);
         ws.connect_url(ws_url);
@@ -267,10 +295,11 @@ public:
         episode++;
         step_no = 0;
         auto task = req["task"];
+        cur_seed = req.value("seed", 1);
         goal = task["item"].get<std::string>() + " x" + std::to_string(task["qty"].get<int>());
         std::ostringstream url;
         url << "file://" << site_path << "?item=" << task["item"].get<std::string>()
-            << "&qty=" << task["qty"].get<int>() << "&seed=" << req.value("seed", 1)
+            << "&qty=" << task["qty"].get<int>() << "&seed=" << cur_seed
             << "&popup_p=" << req.value("popup_p", 0.15) << "&delay_p=" << req.value("delay_p", 0.0);
         cdp("Page.navigate", {{"url", url.str()}});
         json obs;
@@ -307,7 +336,7 @@ public:
         out["reward"] = reward; out["done"] = done; out["truncated"] = truncated; out["step_ms"] = ms;
         out["info"] = err.empty() ? json::object() : json{{"error", err}};
         if (log) {
-            log << json{{"episode", episode}, {"seed", 0}, {"goal", goal}, {"step", step_no}, {"observation", obs},
+            log << json{{"episode", episode}, {"seed", cur_seed}, {"goal", goal}, {"step", step_no}, {"observation", obs},
                         {"action", action}, {"reward", reward}, {"done", done}, {"truncated", truncated},
                         {"step_ms", ms}, {"popup_visible", obs.value("popup", false)}}.dump() << "\n";
             log.flush();

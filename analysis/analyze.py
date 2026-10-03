@@ -123,7 +123,11 @@ def main():
         f.write("## 3. Popup Ablation\n\n")
         for p, s in ablations.items():
             f.write(f"- popup_p={p}: {s[0]}/{s[1]} = {s[0]/max(1,s[1]):.3f}, CI [{s[2]:.3f}, {s[3]:.3f}]\n")
-        f.write("\nHigher popup rates add forced Dismiss clicks. The learned policy can recover when Dismiss is visible, but each popup consumes steps and raises the chance of hitting the 20-step limit.\n\n")
+        same = ablations["0.0"][0] == ablations["0.15"][0] == ablations["0.4"][0] and ablations["0.0"][1] == ablations["0.15"][1] == ablations["0.4"][1]
+        if same:
+            f.write(f"\nSuccess was identical at popup_p=0, 0.15, and 0.4: {ablations['0.0'][0]}/{ablations['0.0'][1]} in each case. On these seeds, the learned policy absorbed popup Dismiss clicks within the 20-step budget, so no episode outcome flipped.\n\n")
+        else:
+            f.write("\nPopup outcomes changed on this run, so the table above is the source of truth for this ablation.\n\n")
         f.write("## 4. Top Failure Reasons\n\n")
         for reason, count in top_fail:
             ex = examples[reason]
